@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# Xcode user-specific files
+xcuserdata/
+*.xcuserstate
+
+# Python
+backend/.env
+backend/.venv/
+**/__pycache__/
+*.pyc
