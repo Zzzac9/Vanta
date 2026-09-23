@@ -1,12 +1,10 @@
 import os
-from typing import Iterable
+from functools import lru_cache
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from langchain_openai import ChatOpenAI
 
-from agent.prompts import SYSTEM_PROMPT
-
-# 从 backend/.env 读取 Key、模型名等配置，避免把密钥写死在源码里。
+# 从 backend/.env 读取配置，避免把 API Key 写进源码。
 load_dotenv()
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
@@ -22,42 +20,18 @@ def is_configured() -> bool:
     return bool(DEEPSEEK_API_KEY)
 
 
-# DeepSeek 提供 OpenAI 兼容接口，因此可以直接使用 AsyncOpenAI 客户端。
-def _client() -> AsyncOpenAI:
+@lru_cache(maxsize=1)
+def get_chat_model() -> ChatOpenAI:
+    """创建并缓存 DeepSeek ChatModel。"""
     if not DEEPSEEK_API_KEY:
         raise LLMNotConfiguredError(
             "缺少 DEEPSEEK_API_KEY，请在 backend/.env 中配置。"
         )
-    return AsyncOpenAI(
+
+    # DeepSeek 提供 OpenAI 兼容接口，所以 LangChain 可以直接用 ChatOpenAI 接入。
+    return ChatOpenAI(
+        model=DEEPSEEK_MODEL,
         api_key=DEEPSEEK_API_KEY,
         base_url=DEEPSEEK_BASE_URL,
-    )
-
-
-# 这里是纯 LLM 层：接收完整消息历史，不负责 LangGraph 的状态管理。
-async def chat_with_deepseek_messages(
-    messages: Iterable[dict[str, str]],
-) -> str:
-    client = _client()
-    # 每次请求都把系统提示放在最前面，再拼接当前 thread 的历史消息。
-    payload = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        *list(messages),
-    ]
-
-    response = await client.chat.completions.create(
-        model=DEEPSEEK_MODEL,
-        messages=payload,
-        stream=False,
-    )
-
-    reply = response.choices[0].message.content
-    if not reply or not reply.strip():
-        raise RuntimeError("DeepSeek 返回了空回复。")
-    return reply.strip()
-
-
-async def chat_with_deepseek(message: str) -> str:
-    return await chat_with_deepseek_messages(
-        [{"role": "user", "content": message}]
+        temperature=0.2,
     )

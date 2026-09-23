@@ -1,60 +1,82 @@
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langgraph.checkpoint.memory import InMemorySaver
+from typing import Any
+
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
-from services.llm import chat_with_deepseek_messages
-
-
-# LangGraph 内部使用 Message 对象；DeepSeek 的 OpenAI 兼容接口需要 role/content 字典。
-def _to_provider_messages(messages):
-    result = []
-    for message in messages:
-        if isinstance(message, HumanMessage):
-            role = "user"
-        elif isinstance(message, AIMessage):
-            role = "assistant"
-        elif isinstance(message, SystemMessage):
-            role = "system"
-        else:
-            continue
-
-        content = message.content
-        if not isinstance(content, str):
-            content = str(content)
-        result.append({"role": role, "content": content})
-    return result
+from agent.prompts import SYSTEM_PROMPT
+from services.llm import get_chat_model
+from tools.memory import MEMORY_TOOLS
 
 
-# 当前 Phase 1 只有一个节点：把完整会话历史交给 DeepSeek，并把回复写回 State。
 async def _call_model(state: MessagesState):
-    reply = await chat_with_deepseek_messages(
-        _to_provider_messages(state["messages"])
+    """Agent 节点：让模型基于当前 State 决定回答，或发起 Tool Call。"""
+    # bind_tools 会把工具 schema 告诉模型。
+    # 模型如果认为需要工具，会返回带 tool_calls 的 AIMessage。
+    model_with_tools = get_chat_model().bind_tools(MEMORY_TOOLS)
+
+    response = await model_with_tools.ainvoke(
+        [
+            SystemMessage(content=SYSTEM_PROMPT),
+            *state["messages"],
+        ]
     )
-    return {"messages": [AIMessage(content=reply)]}
+
+    # MessagesState 会把新消息追加到历史，而不是覆盖旧消息。
+    return {"messages": [response]}
 
 
-# Checkpointer 负责保存每个 thread_id 的短期会话历史。
-# InMemorySaver 只存在内存里，所以后端重启后这些历史会消失。
-checkpointer = InMemorySaver()
+def build_graph(checkpointer: Any):
+    """构建并编译 Vanta 的 LangGraph。"""
+    builder = StateGraph(MessagesState)
 
-# Phase 1 的图非常简单：START -> agent -> END。以后工具节点会从这里继续扩展。
-_builder = StateGraph(MessagesState)
-_builder.add_node("agent", _call_model)
-_builder.add_edge(START, "agent")
-_builder.add_edge("agent", END)
+    # 1) 注册节点。
+    builder.add_node("agent", _call_model)
+    builder.add_node("tools", ToolNode(MEMORY_TOOLS))
 
-vanta_graph = _builder.compile(checkpointer=checkpointer)
+    # 2) 注册普通边：程序从 START 先进入 agent。
+    builder.add_edge(START, "agent")
+
+    # 3) 注册条件边：
+    # tools_condition 会检查最后一条 AIMessage 是否包含 tool_calls。
+    # 有工具调用 -> tools；没有 -> END。
+    builder.add_conditional_edges(
+        "agent",
+        tools_condition,
+        {
+            "tools": "tools",
+            "__end__": END,
+        },
+    )
+
+    # 工具执行完后回到 agent，让模型读取工具结果并组织最终回答。
+    builder.add_edge("tools", "agent")
+
+    # Checkpointer 负责保存每个 thread_id 的短期会话 State。
+    return builder.compile(checkpointer=checkpointer)
 
 
-async def run_agent(message: str, thread_id: str) -> str:
-    # LangGraph 用 configurable.thread_id 找到对应会话的 Checkpoint。
-    config = {"configurable": {"thread_id": thread_id}}
-    result = await vanta_graph.ainvoke(
+async def run_agent(
+    graph: Any,
+    message: str,
+    thread_id: str,
+) -> str:
+    """运行一次 Agent；相同 thread_id 会恢复同一段短期上下文。"""
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+        }
+    }
+
+    result = await graph.ainvoke(
         {"messages": [HumanMessage(content=message)]},
         config=config,
     )
+
     final_message = result["messages"][-1]
     content = final_message.content
+
     if not isinstance(content, str):
         content = str(content)
+
     return content

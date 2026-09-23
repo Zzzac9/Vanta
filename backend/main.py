@@ -1,20 +1,51 @@
-from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from pydantic import BaseModel
 
-from agent.graph import run_agent
+from agent.graph import build_graph, run_agent
 from services.llm import (
     DEEPSEEK_MODEL,
     LLMNotConfiguredError,
     is_configured,
 )
+from services.memory_store import init_memory_db
 
-# FastAPI 只负责 HTTP 接口；真正的 Agent 逻辑放在 agent/ 目录里。
-app = FastAPI(title="Vanta Backend")
+DATA_DIR = Path(__file__).resolve().parent / "data"
+CHECKPOINT_DB_PATH = DATA_DIR / "vanta_checkpoints.sqlite"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI 启动时初始化两类持久化存储。"""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 长期记忆：我们自己维护的 memories 表。
+    init_memory_db()
+
+    # 短期记忆：LangGraph Checkpointer 保存每个 thread_id 的完整 State。
+    async with AsyncSqliteSaver.from_conn_string(
+        str(CHECKPOINT_DB_PATH)
+    ) as checkpointer:
+        await checkpointer.setup()
+        app.state.vanta_graph = build_graph(checkpointer)
+        yield
+
+
+# FastAPI 只负责 HTTP；Agent 的流程编排放在 agent/graph.py。
+app = FastAPI(
+    title="Vanta Backend",
+    lifespan=lifespan,
+)
 
 
 class ChatRequest(BaseModel):
     message: str
-    # thread_id 用来区分不同对话。相同 thread_id 会复用同一段短期上下文。
+
+    # 相同 thread_id 代表同一段短期会话。
+    # 保留默认值是为了兼容旧版 iPhone 客户端。
     thread_id: str = "iphone-main-chat"
 
 
@@ -28,6 +59,7 @@ def root():
         "name": "Vanta Backend",
         "status": "running",
         "agent": "LangGraph",
+        "memory": "SQLite",
         "model": DEEPSEEK_MODEL,
         "configured": is_configured(),
     }
@@ -38,16 +70,21 @@ def health():
     return {
         "status": "ok",
         "agent": "LangGraph",
+        "short_term_memory": "sqlite-checkpointer",
+        "long_term_memory": "sqlite",
         "llm_configured": is_configured(),
         "model": DEEPSEEK_MODEL,
     }
 
 
-# iPhone 的聊天请求统一从这里进入，再交给 LangGraph。
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    message = request.message.strip()
-    thread_id = request.thread_id.strip()
+async def chat(
+    payload: ChatRequest,
+    request: Request,
+):
+    """iPhone 的聊天请求从这里进入，再交给 LangGraph。"""
+    message = payload.message.strip()
+    thread_id = payload.thread_id.strip()
 
     if not message:
         raise HTTPException(status_code=400, detail="message 不能为空")
@@ -55,8 +92,12 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="thread_id 不能为空")
 
     try:
-        # FastAPI 不关心 Agent 内部怎么推理，只等待最终回复。
-        reply = await run_agent(message, thread_id)
+        # graph 已在 FastAPI 启动阶段编译完成，这里只负责运行它。
+        reply = await run_agent(
+            request.app.state.vanta_graph,
+            message,
+            thread_id,
+        )
     except LLMNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
