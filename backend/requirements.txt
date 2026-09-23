@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+pydantic
+openai
+python-dotenv
+langgraph==0.6.11
