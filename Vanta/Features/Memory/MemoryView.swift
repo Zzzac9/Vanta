@@ -2,95 +2,115 @@ import SwiftUI
 import Foundation
 
 struct MemoryView: View {
-    @State private var memories: [MemoryItem] = MemoryStore.load()
-    @State private var newMemory = ""
+    @State private var memories: [RemoteMemory] = []
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    @AppStorage("vanta.backend.url")
+    private var backendURL = "http://192.168.0.10:8000"
 
     var body: some View {
-        List {
-            if memories.isEmpty {
+        Group {
+            if isLoading && memories.isEmpty {
+                ProgressView("正在读取长期记忆…")
+            } else if let errorMessage, memories.isEmpty {
                 ContentUnavailableView(
-                    "暂无记忆",
+                    "无法读取记忆",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(errorMessage)
+                )
+            } else if memories.isEmpty {
+                ContentUnavailableView(
+                    "暂无长期记忆",
                     systemImage: "brain.head.profile",
-                    description: Text("你可以先手动添加一些信息，之后会由 Vanta 自动管理长期记忆。")
+                    description: Text(
+                        "在聊天中让 Vanta“记住”某件事后，会显示在这里。"
+                    )
                 )
             } else {
-                ForEach(memories) { memory in
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(memory.text)
-                        Text(memory.createdAt.formatted(date: .abbreviated, time: .shortened))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 3)
-                }
-                .onDelete(perform: deleteMemories)
+                memoryList
             }
         }
         .navigationTitle("记忆")
         .toolbar {
-            EditButton()
-        }
-        .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 10) {
-                TextField("添加一条记忆…", text: $newMemory)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit(addMemory)
-
-                Button(action: addMemory) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: 28))
+            Button {
+                Task {
+                    await loadMemories()
                 }
-                .disabled(newMemory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            } label: {
+                Image(systemName: "arrow.clockwise")
             }
-            .padding(.horizontal)
-            .padding(.vertical, 8)
-            .background(.bar)
+            .accessibilityLabel("刷新")
+        }
+        .task {
+            await loadMemories()
         }
     }
 
-    private func addMemory() {
-        let text = newMemory.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+    private var memoryList: some View {
+        List {
+            ForEach(memories) { memory in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(memory.content)
 
-        memories.insert(MemoryItem(text: text, createdAt: Date()), at: 0)
-        newMemory = ""
-        MemoryStore.save(memories)
-    }
-
-    private func deleteMemories(at offsets: IndexSet) {
-        memories.remove(atOffsets: offsets)
-        MemoryStore.save(memories)
-    }
-}
-
-private struct MemoryItem: Identifiable, Codable {
-    let id: UUID
-    let text: String
-    let createdAt: Date
-
-    init(id: UUID = UUID(), text: String, createdAt: Date) {
-        self.id = id
-        self.text = text
-        self.createdAt = createdAt
-    }
-}
-
-private enum MemoryStore {
-    static let key = "vanta.local.memories"
-
-    static func load() -> [MemoryItem] {
-        guard
-            let data = UserDefaults.standard.data(forKey: key),
-            let items = try? JSONDecoder().decode([MemoryItem].self, from: data)
-        else {
-            return []
+                    Text(formattedDate(memory.createdAt))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+                .swipeActions {
+                    Button(role: .destructive) {
+                        deleteMemory(memory)
+                    } label: {
+                        Label("删除", systemImage: "trash")
+                    }
+                }
+            }
         }
-        return items
+        .refreshable {
+            await loadMemories()
+        }
     }
 
-    static func save(_ items: [MemoryItem]) {
-        guard let data = try? JSONEncoder().encode(items) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+    private func loadMemories() async {
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            memories = try await VantaAPIClient.fetchMemories(
+                baseURL: backendURL
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+
+        isLoading = false
+    }
+
+    private func deleteMemory(_ memory: RemoteMemory) {
+        memories.removeAll { $0.id == memory.id }
+
+        Task {
+            do {
+                try await VantaAPIClient.deleteMemory(
+                    id: memory.id,
+                    baseURL: backendURL
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+                await loadMemories()
+            }
+        }
+    }
+
+    private func formattedDate(_ value: String) -> String {
+        guard let date = ISO8601DateFormatter().date(from: value) else {
+            return value
+        }
+
+        return date.formatted(
+            date: .abbreviated,
+            time: .shortened
+        )
     }
 }
 

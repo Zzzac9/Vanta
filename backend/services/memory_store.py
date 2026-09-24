@@ -69,3 +69,35 @@ def search_memory_records(query: str, limit: int = 5) -> list[str]:
         ).fetchall()
 
     return [row[0] for row in rows]
+
+
+def list_memory_records() -> list[dict[str, str]]:
+    """返回全部长期记忆，供 iPhone 的“记忆”页面展示。"""
+    with sqlite3.connect(MEMORY_DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, content, created_at
+            FROM memories
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "content": row[1],
+            "created_at": row[2],
+        }
+        for row in rows
+    ]
+
+
+def delete_memory_record(memory_id: str) -> bool:
+    """按 id 删除一条长期记忆。"""
+    with sqlite3.connect(MEMORY_DB_PATH) as conn:
+        cursor = conn.execute(
+            "DELETE FROM memories WHERE id = ?",
+            (memory_id,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0

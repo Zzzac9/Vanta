@@ -7,5 +7,9 @@
         <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+    <key>NSHealthShareUsageDescription</key>
+    <string>Vanta 需要读取你的步数、活动能量、训练和睡眠数据，用于回答与你的健康和活动相关的问题。</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Vanta 需要读取你的日历，用于回答今天的安排和下一条日程等问题。</string>
 </dict>
 </plist>

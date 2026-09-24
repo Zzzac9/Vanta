@@ -34,4 +34,6 @@ def get_chat_model() -> ChatOpenAI:
         api_key=DEEPSEEK_API_KEY,
         base_url=DEEPSEEK_BASE_URL,
         temperature=0.2,
+        # 开启 provider 级 streaming，callback 才能逐 token 收到内容。
+        streaming=True,
     )
